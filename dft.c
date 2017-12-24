@@ -427,51 +427,6 @@ void dft_2d_simd(float* input, std::complex<float>* output, int n,
     }
   }
   /*
-  // First 5 rows are real component, next 3 are imaginary.
-  for (int r = 0; r < 5; ++r) {
-    for (int c = 0; c <= 4; ++c) {
-      output[r * n + c].real(out_real2_8x8[r * n + c]);
-      output[r * n + c].imag(0);
-    }
-    for (int c = 5; c < 8; ++c) {
-      output[r * n + (c - 4)] +=
-          std::complex<float>(0, out_real2_8x8[r * n + c]);
-    }
-  }
-  for (int r = 0; r < 3; ++r) {
-    for (int c = 0; c <= 4; ++c) {
-      output[(r + 1) * n + c] +=
-          std::complex<float>(0, out_real2_8x8[(r + 5) * n + c]);
-    }
-    for (int c = 5; c < 8; ++c) {
-      output[(r + 1) * n + (c - 4)] +=
-          std::complex<float>(-out_real2_8x8[(r + 5) * n + c], 0);
-    }
-    }*/
-    /*
-      output[r * n + c].imag(out_imag_8x8[c * 8 + r]
-                             +out_real3_8x8[c * 8 + r]);
-      */
-
-  /*
-  for (int r = 5; r < 8; ++r) {
-    for (int c = 5; c < 8; ++c) {
-      int t = (8 - c) * 8 + r;
-      output[r * n + c] = std::complex<float>(
-          out_real_8x8[t] + out_imag3_8x8[t],
-          -out_imag_8x8[t] + out_real3_8x8[t]);
-    }
-  }
-  */
-  /*
-  for (int r = 0; r < 5; ++r) {
-    for (int c = 0; c < 8; ++c) {
-      output[r * n + c] += std::complex<float>(
-          -out_imag2_8x8[r * n + c],
-          out_real2_8x8[r *n + c]);
-    }
-    }*/
-  /*
   for (int y = 0; y < n; ++y) {
     for (int x = 0; x < n; ++x) {
       printf("%f ", output[y * n + x].real());
