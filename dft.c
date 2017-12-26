@@ -12,13 +12,61 @@
 #include "simd.c"
 
 template <typename T>
+struct SimdHelper {
+  static const T constant(const float& f);
+  static const T load(const float* f);
+  static void store(float* f, const T&);
+};
+
+template <>
+const float SimdHelper<float>::constant(const float& f) {
+  return f;
+}
+
+template <>
+const float SimdHelper<float>::load(const float* f) {
+  return *f;
+}
+
+template <>
+void SimdHelper<float>::store(float* output, const float& f) {
+  *output = f;
+}
+
+template <>
+const __m256 SimdHelper<__m256>::constant(const float& f) {
+  return _mm256_set1_ps(f);
+}
+template <>
+const __m256 SimdHelper<__m256>::load(const float* f) {
+  return _mm256_load_ps(f);
+}
+template <>
+void SimdHelper<__m256>::store(float* output, const __m256& f) {
+  _mm256_store_ps(output, f);
+}
+
+template <>
+const __m128 SimdHelper<__m128>::constant(const float& f) {
+  return _mm_set1_ps(f);
+}
+
+template <>
+const __m128 SimdHelper<__m128>::load(const float* f) {
+  return _mm_load_ps(f);
+}
+template <>
+void SimdHelper<__m128>::store(float* output, const __m128& f) {
+  _mm_store_ps(output, f);
+}
+
+template <typename T>
 T load(float f);
 
 template <>
 float load(float f) {
   return f;
 }
-
 /*
 template <>
 __m128 load(float f) {
@@ -29,6 +77,9 @@ template <>
 __m256 load(float f) {
   return _mm256_set1_ps(f);
 }
+
+typedef void (*dft_fun_t)(const float*, float*, int);
+
 
 #include "gen.h"
 
@@ -46,227 +97,13 @@ struct Timer {
   double stop_;
 };
 
-struct Expression {
-  int num = 0;
-  int out_var = 0;
-  bool is_real = 0;
-  int vars[2];
-  std::complex<float> weights[2];
-  bool conj[2];
-  int weight_ind[2][2];
-};
-
-std::vector<std::unique_ptr<Expression> > expressions;
-
-void dft_builder(Expression** input,
-                 Expression** output, int n,
-                 std::vector<std::unique_ptr<Expression> >& exprs) {
-  if (n == 1) {
-    output[0] = input[0];
-    return;
+float* aligned_floats(int n) {
+  float* f = (float*)malloc(sizeof(float)*(n + 16));
+  while (((uint64_t)f) % 128 != 0) {
+    f++;
   }
-  std::vector<Expression*> temp(n);
-  std::vector<Expression*> out1(n / 2);
-  std::vector<Expression*> out2(n / 2);
-  for (int k = 0; k < n/2; ++k) {
-    temp[k] = input[2 * k];
-    temp[n/2 + k] = input[2 * k + 1];
-  }
-  dft_builder(&temp[0], &out1[0], n / 2, exprs);
-  dft_builder(&temp[0] + n / 2, &out2[0], n / 2, exprs);
-
-  for (int k = 0; k < n / 2; ++k) {
-    std::complex<float> w = std::complex<float>(
-        cos(2. * M_PI * k / n), -sin(2. * M_PI * k / n));
-    int k1 = k;
-    bool conj_v1 = false;
-    bool conj_v2 = false;
-
-    // Values in output > n / 4 don't exist; use conjugate symmetry
-    if (k1 > n / 4) {
-      conj_v1 = true;
-      conj_v2 = true;
-      k1 = n / 2 - k1;
-    }
-    //fprintf(stderr, "%d/%d %d/%d %d\n", k1, conj_v1, k2, conj_v2, n / 2);
-    std::unique_ptr<Expression> new_expr(new Expression);
-    const int v1 = out1[k1]->out_var;
-    const int v2 = out2[k1]->out_var;
-
-    new_expr->num = 2;
-    new_expr->is_real = out1[k1]->is_real && out2[k1]->is_real && (w.imag() == 0);
-    new_expr->vars[0] = v1;
-    new_expr->vars[1] = v2;
-    new_expr->weights[0] = 1;
-    new_expr->weights[1] = w;
-    new_expr->conj[0] = conj_v1;
-    new_expr->conj[1] = conj_v2;
-    new_expr->out_var = exprs.size();
-    output[k] = new_expr.get();
-    exprs.push_back(std::move(new_expr));
-
-    if (k1 == 0) { //  <= n / 2) {
-      // Add the one extra output
-      new_expr.reset(new Expression);
-      new_expr->num = 2;
-      new_expr->is_real = out1[k1]->is_real && out2[k1]->is_real && (w.imag() == 0);
-      new_expr->vars[0] = v1;
-      new_expr->vars[1] = v2;
-      new_expr->weights[0] = 1;
-      new_expr->weights[1] = -w;
-      new_expr->conj[0] = conj_v1;
-      new_expr->conj[1] = conj_v2;
-      new_expr->out_var = exprs.size();
-      output[k1 + n / 2] = new_expr.get();
-      exprs.push_back(std::move(new_expr));
-    }
-  }
-  for (int k = n / 2 + 1; k < n; ++k) {
-    output[k] = 0;
-  }
+  return f;
 }
-
-void run_dft_builder(int n) {
-  std::vector<std::unique_ptr<Expression> > exprs(n);
-  std::vector<Expression*> input(n);
-  std::vector<Expression*> output(n);
-  for (int i = 0; i < n; ++i) {
-    exprs[i] = std::unique_ptr<Expression>(new Expression);
-    exprs[i]->out_var = i;
-    exprs[i]->num = 1;
-    exprs[i]->is_real = 1;
-    exprs[i]->vars[0] = i;
-    exprs[i]->vars[1] = -1;
-    exprs[i]->weights[0] = 1;
-    exprs[i]->weights[1] = 0;
-    input[i] = exprs[i].get();
-  }
-  dft_builder(&input[0], &output[0], n, exprs);
-  fprintf(stderr, "// Num expressions: %d\n", (int)exprs.size());
-  std::vector<float> weights;
-  weights.push_back(0);
-  weights.push_back(1);
-
-  for (int k = 0; k < exprs.size(); ++k) {
-    for (int h = 0; h < 2; ++h) {
-      for (int i = 0; i < 2; ++i) {
-        int found = -1;
-        float w = i == 0 ? exprs[k]->weights[h].real() :
-            exprs[k]->weights[h].imag();
-        for (int j = 0; j < weights.size(); ++j) {
-          if (std::abs(weights[j] - std::abs(w)) < 1e-7) {
-            found = j;
-            break;
-          }
-        }
-        if (found < 0) {
-          found = weights.size();
-          weights.push_back(std::abs(w));
-        }
-        exprs[k]->weight_ind[h][i] = w < 0 ? -found : found;
-      }
-    }
-  }
-  fprintf(stderr, "// Weights: %d\n", (int)weights.size());
-  std::unordered_map<int, int> output_vars;
-  for (int h = 0; h < output.size() / 2 + 1; ++h) {
-    output_vars[output[h]->out_var] = h;
-  }
-
-  fprintf(stderr, "void dft_%d(float* input, std::complex<float>* output) {\n", n);
-  for (int k = 2; k < weights.size(); ++k) {
-    fprintf(stderr, "  const float kWeight%d = %g;\n", k, weights[k]);
-  }
-  for (int h = 0; h < exprs.size(); ++h) {
-    const Expression& expr = *exprs[h];
-    if (expr.num == 1) {
-    } else {
-      if (output_vars.find(h) == output_vars.end()) {
-        if (expr.is_real) {
-          fprintf(stderr, "  const float w%d = ",
-                  expr.out_var - n);
-        } else {
-          fprintf(stderr, "  const std::complex<float> w%d = ",
-                  expr.out_var - n);
-        }
-      } else {
-        fprintf(stderr, "  output[%d] = ", output_vars[h]);
-      }
-      std::vector<std::string> ab(2);
-      std::vector<std::pair<std::string, std::string> > parts(2);
-      std::vector<bool> is_real(2);
-      for (int k = 0; k < 2; ++k) {
-        int v = expr.vars[k];
-        char var_name[64];
-        is_real[k] = exprs[v]->is_real;
-
-        if (exprs[v]->num == 1) {
-          snprintf(var_name, sizeof(var_name), "input[%d]", exprs[v]->out_var);
-        } else if (output_vars.find(exprs[v]->out_var) != output_vars.end()) {
-          snprintf(var_name, sizeof(var_name), "output[%d]",
-                   output_vars[exprs[v]->out_var]);
-        } else {
-          snprintf(var_name, sizeof(var_name), "w%d", exprs[v]->out_var - n);
-        }
-        char mod_var[64];
-        if (expr.conj[k] && !is_real[k]) {
-          snprintf(mod_var, sizeof(mod_var), "std::conj(%s)", var_name);
-        } else {
-          snprintf(mod_var, sizeof(mod_var), "%s", var_name);
-        }
-        char result[64];
-        if (expr.weight_ind[k][0] == 1 &&
-            expr.weight_ind[k][1] == 0) {
-          snprintf(result, sizeof(result), "%s ", mod_var);
-          parts[k] = std::make_pair(std::string(result), "");
-        } else if (expr.weight_ind[k][0] == -1 &&
-                   expr.weight_ind[k][1] == 0) {
-          snprintf(result, sizeof(result), "-%s ", mod_var);
-          parts[k] = std::make_pair(std::string(result), "");
-        } else {
-          char real_weight[64] = {0};
-          char imag_weight[64] = {0};
-          if (expr.weight_ind[k][0] == -1) {
-            snprintf(real_weight, sizeof(real_weight), "-");
-          } else if (expr.weight_ind[k][0] != 1) {
-            snprintf(real_weight, sizeof(real_weight), "%ckWeight%d",
-                     expr.weight_ind[k][0] < 0 ? '-' : ' ',
-                     std::abs(expr.weight_ind[k][0]));
-          }
-          if (expr.weight_ind[k][1] == -1) {
-            snprintf(imag_weight, sizeof(imag_weight), "-");
-          } else if (expr.weight_ind[k][1] != 1) {
-            snprintf(imag_weight, sizeof(imag_weight), "%ckWeight%d",
-                     expr.weight_ind[k][1] < 0 ? '-' : ' ',
-                     std::abs(expr.weight_ind[k][1]));
-          }
-          snprintf(result, sizeof(result),
-                  " std::complex<float>(%s, %s) * %s",
-                   real_weight, imag_weight, mod_var);
-          // This only makes sense for the case when variable is real
-          parts[k] = std::make_pair(
-              expr.weight_ind[k][0] == 0 ? "" : std::string(real_weight) + " * " + mod_var,
-              strlen(imag_weight) <= 2 ? std::string(imag_weight) + mod_var :
-              std::string(imag_weight) + " * " + mod_var);
-        }
-        ab[k] = result;
-      }
-      if (!expr.is_real && is_real[0] && is_real[1]) {
-        fprintf(stderr, " {%s %s %s, %s %s %s};\n",
-                parts[0].first.c_str(),
-                parts[0].first.empty() || parts[1].first.empty() ? "" : "+",
-                parts[1].first.c_str(),
-                parts[0].second.c_str(),
-                parts[0].second.empty() || parts[1].second.empty() ? "" : "+",
-                parts[1].second.c_str());
-      } else {
-        fprintf(stderr, "%s + %s;\n", ab[0].c_str(), ab[1].c_str());
-      }
-    }
-  }
-  fprintf(stderr, "}\n");
-}
-
 
 void dft(float* data, std::complex<float>* result, int n) {
   if (n == 1) {
@@ -310,17 +147,24 @@ std::vector<std::complex<float> > dft(std::vector<float> &data) {
   */
 }
 
-void validate(int n, void (*func)(float*, std::complex<float>*)) {
+void validate_1d(int n, dft_fun_t func) {
   std::vector<float> d(n);
   std::vector<std::complex<float> > act(n);
+  std::vector<float> compact(n);
   int num_different = 0;
 
   for (int i = 0; i < n; ++i) {
     d[i] = 1;
     std::vector<std::complex<float> > exp = dft(d);
-    func(&d[0], &act[0]);
+    func(&d[0], &compact[0], 1);
+    for (int k = 0; k <= n / 2; k++) {
+      act[k] = std::complex<float>(
+          compact[k],
+          k > 0 && k < n / 2 ? compact[n/2 + k] : 0);
+    }
+
     for (int k = 0; k <= n / 2; ++k) {
-      printf("%f+%fi ", act[k].real(), act[k].imag());
+      //printf("%f+%fi ", act[k].real(), act[k].imag());
       if (std::abs(act[k].imag() - exp[k].imag()) > 1e-5 ||
           std::abs(act[k].real() - exp[k].real()) > 1e-5) {
         num_different++;
@@ -328,65 +172,104 @@ void validate(int n, void (*func)(float*, std::complex<float>*)) {
                exp[k].real(), exp[k].imag(),
                act[k].real(), act[k].imag(), i, k);
       }
-
       //printf("%f+%fi ", res[k].real(), res[k].imag());
     }
-    printf("\n");
+    //printf("\n");
     d[i] = 0;
   }
   printf("%d  %s\n", n, num_different == 0 ? "OK" : "FAILED");
 }
 
-inline void transpose4x4_SSE(float *A, float *B, const int lda, const int ldb) {
-    __m128 row1 = _mm_load_ps(&A[0*lda]);
-    __m128 row2 = _mm_load_ps(&A[1*lda]);
-    __m128 row3 = _mm_load_ps(&A[2*lda]);
-    __m128 row4 = _mm_load_ps(&A[3*lda]);
-     _MM_TRANSPOSE4_PS(row1, row2, row3, row4);
-     _mm_store_ps(&B[0*ldb], row1);
-     _mm_store_ps(&B[1*ldb], row2);
-     _mm_store_ps(&B[2*ldb], row3);
-     _mm_store_ps(&B[3*ldb], row4);
+inline void transpose4x4_SSE(const float *A, float *B, const int lda, const int ldb) {
+  __m128 row1 = _mm_load_ps(&A[0*lda]);
+  __m128 row2 = _mm_load_ps(&A[1*lda]);
+  __m128 row3 = _mm_load_ps(&A[2*lda]);
+  __m128 row4 = _mm_load_ps(&A[3*lda]);
+  _MM_TRANSPOSE4_PS(row1, row2, row3, row4);
+  _mm_store_ps(&B[0*ldb], row1);
+  _mm_store_ps(&B[1*ldb], row2);
+  _mm_store_ps(&B[2*ldb], row3);
+  _mm_store_ps(&B[3*ldb], row4);
 }
 
-inline void transpose8x8_SSE(float *A, float *B) {
+inline void transpose8x8_SSE(const float *A, float *B) {
   transpose4x4_SSE(A, B, 8, 8);
   transpose4x4_SSE(A + 4 * 8, B + 4, 8, 8);
   transpose4x4_SSE(A + 4, B + 4 * 8, 8, 8);
   transpose4x4_SSE(A + 4 * 8 + 4, B + 4 * 8 + 4, 8, 8);
 }
 
+void unpack_2d_output(const float* col_fft,
+                      std::complex<float>* output, int n) {
+  for (int y = 0; y <= n/2; ++y) {
+    const int y2 = y + n/2;
+    const bool y_extra = y2 > n/2 && y2 < n;
 
-void dft_2d_simd(float* input, std::complex<float>* output, int n,
-            void (*tform)(float*, std::complex<float>*)) {
-  static float* out_real_8x8 = (float*)aligned_alloc(8 * 8 * sizeof(float), 64);
-  static float* out_real2_8x8 = (float*)aligned_alloc(8 * 8 * sizeof(float), 64);
+    for (int x = 0; x <= n/2; ++x) {
+      const int x2 = x + n/2;
+      const bool x_extra = x2 > n/2 && x2 < n;
+      output[y * n + x] = std::complex<float>(
+          col_fft[x * n + y] -
+          (x_extra && y_extra ? col_fft[x2 * n + y2] : 0),
+          (y_extra ? col_fft[x * n + y2] : 0) +
+          (x_extra ? col_fft[x2 * n + y] : 0 ));
 
-  dft_8_simd(input, out_real_8x8);
-  /*
-  for (int r = n / 2 + 1; r < n; ++r) {
-    memcpy(out_real_8x8 + r * n,
-           out_real_8x8 + (n - r) * n,
-           sizeof(float) * n);
+      if (y_extra) {
+        output[(n - y) * n + x] = std::complex<float>(
+            col_fft[x * n + y] +
+            (x_extra && y_extra ? col_fft[x2 * n + y2] : 0),
+            -(y_extra ? col_fft[x * n + y2] : 0) +
+            (x_extra ? col_fft[x2 * n + y] : 0 ));
+      }
+    }
+  }
+}
 
-    for (int x = 0; x < n; ++x) {
-      out_imag_8x8[r * n + x] = -out_imag_8x8[(n - r) * n + n - x];
+template <int vec_size=4>
+void dft_2d_simd2(const float* input, std::complex<float>* output, int n,
+                  dft_fun_t tform) {
+  static float* out_real = (float*)aligned_floats(32 * 32 + 10);
+  static float* out_real2 = (float*)aligned_floats(32 * 32 + 10);
+
+  for (int x = 0; x < n; x += vec_size) {
+    tform(input + x, out_real + x, n);
+  }
+
+  for (int y = 0; y < n; y += 4) {
+    for (int x = 0; x < n; x += 4) {
+      transpose4x4_SSE(out_real + y * n + x,
+                       out_real2 + x * n + y, n, n);
     }
+  }
+
+  for (int x = 0; x < n; x += vec_size) {
+    tform(out_real2 + x, out_real + x, n);
+  }
+
+  for (int y = 0; y < n; y += 4) {
+    for (int x = 0; x < n; x += 4) {
+      transpose4x4_SSE(out_real + y * n + x,
+                       out_real2 + x * n + y, n, n);
     }
-    /*
-  for (int y = 0; y < n; ++y) {
-    for (int x = 0; x < n; ++x) {
-      printf("%f ", out_imag_8x8[y * n + x]);
-    }
-    printf("\n");
-    }*/
-  //  exit(1);
+  }
+  unpack_2d_output(out_real, output, n);
+}
+
+void dft_2d_simd(const float* input, std::complex<float>* output, int n,
+                 dft_fun_t tform) {
+  static float* out_real_8x8 = (float*)aligned_floats(32 * 32);
+  static float* out_real2_8x8 = (float*)aligned_floats(32 * 32);
+
+  dft_8_simd(input, out_real_8x8, 8);
+
   transpose8x8_SSE(out_real_8x8, out_real2_8x8);
 
-  dft_8_simd(out_real2_8x8, out_real_8x8);
+  dft_8_simd(out_real2_8x8, out_real_8x8, 8);
 
   transpose8x8_SSE(out_real_8x8, out_real2_8x8);
 
+  //unpack_2d_output(out_real_8x8, output, n);
+  //return;
 
   output[0] = out_real2_8x8[0];
   output[4 * n] =  out_real2_8x8[4 * n];
@@ -426,227 +309,273 @@ void dft_2d_simd(float* input, std::complex<float>* output, int n,
           out_real2_8x8[r3 * n + c + 4]);
     }
   }
-  /*
-  for (int y = 0; y < n; ++y) {
-    for (int x = 0; x < n; ++x) {
-      printf("%f ", output[y * n + x].real());
-    }
-    printf("\n");
-  }
-  exit(1);
-  */
   return;
-
 }
 
-void dft_2d(float* input, std::complex<float>* output, int n,
-            void (*tform)(float*, std::complex<float>*)) {
-  static std::complex<float> row_fft[64 * 64];
-  std::complex<float>* row_fft_ptr = row_fft;
+typedef void (*dft_2d_fun_t)(const float*, std::complex<float>*, int n, dft_fun_t);
+
+void dft_2d(const float* input, std::complex<float>* output, int n,
+            dft_fun_t tform) {
+  static float row_fft[64 * 64];
+  static float col_fft[64 * 64];
+
+  float* fft_ptr = row_fft;
   for (int y = 0; y < n; y++) {
-    tform(input, row_fft_ptr);
-    for (int x = n / 2 + 1; x < n; ++x) {
-      row_fft_ptr[x] = std::conj(row_fft_ptr[n - x]);
-    }
-    row_fft_ptr += n;
+    tform(input, fft_ptr, 1);
+    fft_ptr += n;
     input += n;
   }
-
-  float real[n], imag[n];
-  std::complex<float> real_fft[n], imag_fft[n];
+  float col[n];
   for (int x = 0; x < n; ++x) {
-    bool all_imag_zero = true;
-    bool all_real_zero = true;
     for (int y = 0; y < n; ++y) {
-      real[y] = row_fft[y * n + x].real();
-      imag[y] = row_fft[y * n + x].imag();
-      all_imag_zero &= (imag[y] == 0);
-      all_real_zero &= (real[y] == 0);
+      col[y] = row_fft[y * n + x];
     }
-    if (all_real_zero) {
-      memset(real_fft, 0, sizeof(real_fft));
-    } else {
-      tform(real, real_fft);
-    }
-    if (all_imag_zero) {
-      memset(imag_fft, 0, sizeof(imag_fft));
-    } else {
-      tform(imag, imag_fft);
-    }
-    for (int y = 0; y <= n/2; ++y) {
-      output[y * n + x] = real_fft[y] +
-          std::complex<float>(-imag_fft[y].imag(), imag_fft[y].real());
-    }
-    for (int y = n/2+1; y < n; ++y) {
-      output[y * n + x] =
-          std::conj(real_fft[n - y]) +
-          std::complex<float>(imag_fft[n - y].imag(),
-                              imag_fft[n - y].real());
-    }
+    tform(col, col_fft + x * n, 1);
   }
+  unpack_2d_output(col_fft, output, n);
+  /*
+  for (int y = 0; y <= n/2; ++y) {
+    const int y2 = y + n/2;
+    const bool y_extra = y2 > n/2 && y2 < n;
+
+    for (int x = 0; x <= n/2; ++x) {
+      const int x2 = x + n/2;
+      const bool x_extra = x2 > n/2 && x2 < n;
+      output[y * n + x] = std::complex<float>(
+          col_fft[x * n + y] -
+          (x_extra && y_extra ? col_fft[x2 * n + y2] : 0),
+          (y_extra ? col_fft[x * n + y2] : 0) +
+          (x_extra ? col_fft[x2 * n + y] : 0 ));
+
+      if (y_extra) {
+        output[(n - y) * n + x] = std::complex<float>(
+            col_fft[x * n + y] +
+            (x_extra && y_extra ? col_fft[x2 * n + y2] : 0),
+            -(y_extra ? col_fft[x * n + y2] : 0) +
+            (x_extra ? col_fft[x2 * n + y] : 0 ));
+      }
+    }
+    }*/
 }
-
-void dft32_2d(float* input, std::complex<float>* output) {
-  int w = 32;
-  std::complex<float> row_fft[32 * 32];
-  for (int y = 0; y < 32; ++y) {
-    dft_32(input + y * 32, row_fft + y * 32);
-    for (int x = 17; x < 32; ++x) {
-      row_fft[y * 32 + x] = std::conj(row_fft[y * 32 + 32 - x]);
-    }
-  }
-  float real[32], imag[32];
-  std::complex<float> real_fft[32], imag_fft[32];
-  for (int x = 0; x <= 16; ++x) {
-    for (int y = 0; y < 32; ++y) {
-      real[y] = row_fft[y * 32 + x].real();
-      imag[y] = row_fft[y * 32 + x].imag();
-    }
-    dft_32(real, real_fft);
-    dft_32(imag, imag_fft);
-    for (int y = 0; y <= 16; ++y) {
-      output[y * w + x] = real[y] + std::complex<float>(0, 1) * imag[y];
-    }
-    for (int y = 17; y < 32; ++y) {
-      output[y * w + x] = std::conj(output[(32 - y) * w + x]);
-    }
-  }
-  // Fill in remaining columns using conjugate symmetry
-  for (int x = 17; x < 32; ++x) {
-    for (int y = 0; y < 32; ++y) {
-      output[y * w + x] = output[y * w + (32 - x)];
-    }
-  }
-}
-
-struct MyType {
-  float a, b, c, d;
-
-  MyType operator+(const MyType& m2) const {
-    const MyType& m1 = *this;
-    return {m1.a + m2.a, m1.b + m2.b, m1.c + m2.c, m1.d + m2.d};
-  }
-  MyType operator-(const MyType& m2) const {
-    const MyType& m1 = *this;
-    return {m1.a - m2.a, m1.b - m2.b, m1.c - m2.c, m1.d - m2.d};
-  }
-  MyType operator*(const MyType& m2) const {
-    const MyType& m1 = *this;
-    return {m1.a * m2.a, m1.b * m2.b, m1.c * m2.c, m1.d * m2.d};
-  }
-  const MyType& operator*=(const MyType& m2) const {
-    return *this;
-  }
-};
-
-typedef void (*dft_fun_t)(float*, std::complex<float>*);
 
 dft_fun_t get_dft(int n) {
   if (n == 2)
-    return dft_2;
+    return dft_2_compact<float>;
   if (n == 4)
-    return dft_4;
+    return dft_4_compact<float>;
   if (n == 8)
-    return dft_8;
+    return dft_8_compact<float>;
   if (n == 16)
-    return dft_16;
+    return dft_16_compact<float>;
   if (n == 32)
-    return dft_32;
+    return dft_32_compact<float>;
+}
+
+void benchmark() {
+  const int n = 8;
+  //std::vector<float> d(n*2);
+  std::vector<std::complex<float> > act(n*2);
+  //std::vector<float> out(n*2);
+  float* d = (float*)aligned_alloc(n * 2 * sizeof(float), 32);
+  float* out = (float*)aligned_alloc(n * 2 * sizeof(float), 32);
+
+  double sum = 0;
+  for (int i = 0; i < 1000000; ++i) {
+    for (int j = 0; j < n; ++j) {
+      d[j % n] = 1 + i + j;
+      //dft_8_sse(d, out);
+      dft_8_compact<float>(&d[0], &out[0]);
+      //dft_32_compact<float>(&d[0], &out[0]);
+      //dft(&d[0], &act[0], n);
+      //d[j % n] = 0;
+      sum += out[0] + out[1] + out[2] + out[3] +
+          out[4] + out[5] + out[6] + out[7];// act[0].imag() + out[0];
+    }
+  }
+  printf("sum: %f\n", sum);
+}
+
+void validate_2d(int n, dft_2d_fun_t fun2d, dft_fun_t func) {
+  std::vector<double> d(n * n);
+  std::vector<std::complex<float> > act(n * n);
+  int num_different = 0;
+
+  fftw_complex* fft = (fftw_complex*)malloc(sizeof(fftw_complex) * n * n);
+  fftw_plan plan = fftw_plan_dft_r2c_2d(n, n, &d[0], fft, 0);
+
+  //std::vector<float> f(n * n);
+  float* f = (float*)malloc((n * n + 64) * sizeof(float));
+  while (((uint64_t)f) % 128 != 0) {
+    f++;
+  }
+  memset(f, 0, sizeof(float) * n * n);
+
+  for (int di = 0; di < n * n; ++di) {
+    f[di] = 1;
+    d[di] = 1;
+
+    fun2d(&f[0], &act[0], n, func);
+    fftw_execute(plan);
+
+    f[di] = 0;
+    d[di] = 0;
+
+    int w = n/2 + 1;
+    const double kThreshold = 1e-5;
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j <= n/2; ++j) {
+        double real_diff = std::abs(act[n * i + j].real() - fft[w * i + j][0]);
+        double imag_diff = std::abs(act[n * i + j].imag() - fft[w * i + j][1]);
+        if (real_diff > kThreshold || imag_diff > kThreshold) {
+          printf("r[%d,%d] %f %f %s\n", i, j,
+                 act[n * i + j].real(),
+                 fft[w * i + j][0],
+                 std::abs(act[n * i + j].real() - fft[w * i + j][0]) < kThreshold ? "ok" : "bad");
+          printf("i[%d,%d] %f %f %s\n", i, j,
+                 act[n * i + j].imag(),
+                 fft[w * i + j][1],
+                 std::abs(act[n * i + j].imag() - fft[w * i + j][1]) < kThreshold ? "ok" : "bad");
+          printf("\n");
+          num_different++;
+        }
+      }
+    }
+  }
+  printf("2d %dx%d  %s\n", n, n, num_different == 0 ? "OK" : "FAILED");
+
+  free(fft);
+  fftw_free(plan);
+}
+
+void benchmark_2d(const int n, dft_2d_fun_t fun2d, dft_fun_t func) {
+  const int n2 = n * n;
+  //std::vector<float> d(n * n);
+  std::vector<std::complex<float> > act(n * n);
+
+  std::vector<double> b(n * n); //  = (double*)malloc(n * n * sizeof(double));
+  fftw_complex* fft = (fftw_complex*)malloc(sizeof(fftw_complex) * n * n);
+  fftw_plan plan = fftw_plan_dft_r2c_2d(n, n, &b[0], fft, 0);
+
+  std::vector<float> r(n * n);
+  float* d = (float*)malloc((n * n + 16) * sizeof(float));
+  while (((uint64_t)d) % 64 != 0) {
+    d++;
+  }
+
+  /*
+  for (int i = 0; i < n; ++i) {
+    for (int j = 0; j < n; ++j) {
+      double v = 2.0 * ((double)rand() / RAND_MAX) - 1.0;
+      printf("%f ", v);
+      b[i * n + j] = v;
+      d[i * n + j] = v;
+    }
+    printf("\n");
+  }
+  printf("\n\n");
+
+  fftw_execute(plan);
+
+  fun2d(d, &act[0], n, func);
+
+  int w = n/2 + 1;
+  for (int i = 0; i < n; ++i) {
+    for (int j = 0; j <= n/2; ++j) {
+      printf("r[%d,%d] %f %f %s\n", i, j,
+             act[n * i + j].real(),
+             fft[w * i + j][0],
+             std::abs(act[n * i + j].real() - fft[w * i + j][0]) < 1e-4 ? "ok" : "bad");
+      printf("i[%d,%d] %f %f %s\n", i, j,
+             act[n * i + j].imag(),
+             fft[w * i + j][1],
+             std::abs(act[n * i + j].imag() - fft[w * i + j][1]) < 1e-4 ? "ok" : "bad");
+    }
+    printf("\n");
+  }
+  printf("\n\n");
+  */
+
+  const int num_trials = 1000000;
+  fprintf(stderr, "\nBenchmarking %d\n", n);
+  fprintf(stderr, "running dft_2d %d\n", n);
+  Timer timer;
+  timer.start();
+  double sum = 0;
+  for (int i = 0; i < num_trials; ++i) {
+    d[i % n2] += 1.0 / (i + 1);
+    fun2d(d, &act[0], n, func);
+    //dft_2d_simd(d, &act[0], n, dft);
+    //dft_2d(d, &act[0], n, dft);
+    //dft_8(&d[0], &act[0]);
+    sum += act[1].real();
+  }
+  const double dft_time = timer.stop();
+
+  fprintf(stderr, "running fftw %d\n", n);
+  timer.start();
+  for (int i = 0; i < num_trials; ++i) {
+    b[i % n2] += 1.0 / (i + 1);
+    fftw_execute(plan);
+    sum += fft[1][0];
+  }
+  const double fftw_time = timer.stop();
+  fprintf(stderr, "Speedup: %f  (%d)\n", dft_time / fftw_time, sum > 1000);
 }
 
 int main(int ac, char* av[]) {
-  if (ac == 1) {
-    for (int x = 2; x <= 32; x *= 2) {
-      run_dft_builder(x);
-    }
+  if (ac <= 1 || av[1][0] == 'b') {
+    benchmark();
     return 0;
   }
   if (av[1][0] == 'v') {
-    validate(2, dft_2);
-    validate(4, dft_4);
-    validate(8, dft_8);
-    validate(16, dft_16);
-    validate(32, dft_32);
-  }
-  if (av[1][0] == 'b') {
-    std::vector<float> d(32);
-    std::vector<std::complex<float> > act(32);
-    double sum = 0;
-    for (int i = 0; i < 100000; ++i) {
-      for (int j = 0; j < 32; ++j) {
-        d[j % 32] = 1;
-        dft_32(&d[0], &act[0]);
-        //dft(&d[0], &act[0], 32);
-        d[j % 32] = 0;
-      }
-      sum += act[0].imag();
-    }
+    fprintf(stderr, "Testing 1d:\n");
+    validate_1d(2, dft_2_compact<float>);
+    validate_1d(4, dft_4_compact<float>);
+    validate_1d(8, dft_8_compact<float>);
+    validate_1d(16, dft_16_compact<float>);
+    validate_1d(32, dft_32_compact<float>);
+
+    fprintf(stderr, "\nTesting 2d:\n");
+    validate_2d(2, dft_2d, dft_2_compact<float>);
+    validate_2d(4, dft_2d, dft_4_compact<float>);
+    validate_2d(8, dft_2d, dft_8_compact<float>);
+    validate_2d(16, dft_2d, dft_16_compact<float>);
+    validate_2d(32, dft_2d, dft_32_compact<float>);
+
+    fprintf(stderr, "\nTesting simd2:\n");
+    //validate_2d(2, dft_2d_simd2<4>, dft_2_compact<__m128>);
+    validate_2d(4, dft_2d_simd2<4>, dft_4_compact<__m128>);
+    validate_2d(8, dft_2d_simd2<4>, dft_8_compact<__m128>);
+    validate_2d(16, dft_2d_simd2<4>, dft_16_compact<__m128>);
+    validate_2d(32, dft_2d_simd2<4>, dft_32_compact<__m128>);
+
+    fprintf(stderr, "\nTest simd (256)\n");
+    validate_2d(8, dft_2d_simd, dft_8_compact<__m256>);
+
+    fprintf(stderr, "\nTest simd2 (256)\n");
+    validate_2d(8, dft_2d_simd2<8>, dft_8_compact<__m256>);
+    validate_2d(16, dft_2d_simd2<8>, dft_16_compact<__m256>);
+    validate_2d(32, dft_2d_simd2<8>, dft_32_compact<__m256>);
   }
   if (av[1][0] == '2') {
-    const int n = 8;
-    int n2 = n  * n;
-    //std::vector<float> d(n * n);
-    float* d = (float*)aligned_alloc(n * n * sizeof(float), 32);
-    std::vector<std::complex<float> > act(n * n);
+    fprintf(stderr, "\nTesting simd(256)\n");
+    benchmark_2d(8, dft_2d_simd, dft_8_compact<__m256>);
 
-    dft_fun_t dft = get_dft(n);
+    fprintf(stderr, "\nTesting simd2(256)\n");
+    benchmark_2d(8, dft_2d_simd2<8>, dft_8_compact<__m256>);
+    benchmark_2d(16, dft_2d_simd2<8>, dft_16_compact<__m256>);
+    benchmark_2d(32, dft_2d_simd2<8>, dft_32_compact<__m256>);
 
-    std::vector<double> b(n * n);
-    fftw_complex* fft = (fftw_complex*)malloc(sizeof(fftw_complex) * n * n);
-    fftw_plan plan = fftw_plan_dft_r2c_2d(n, n, &b[0], fft, 0);
+    benchmark_2d(4, dft_2d, dft_4_compact<float>);
+    benchmark_2d(8, dft_2d, dft_8_compact<float>);
+    benchmark_2d(16, dft_2d, dft_16_compact<float>);
+    benchmark_2d(32, dft_2d, dft_32_compact<float>);
 
-    std::vector<float> r(n * n);
+    benchmark_2d(4, dft_2d_simd2<4>, dft_4_compact<__m128>);
+    benchmark_2d(8, dft_2d_simd2<4>, dft_8_compact<__m128>);
+    benchmark_2d(16, dft_2d_simd2<4>, dft_16_compact<__m128>);
+    benchmark_2d(32, dft_2d_simd2<4>, dft_32_compact<__m128>);
 
-    float data[8][8];
-    for (int i = 0; i < n; ++i) {
-      for (int j = 0; j < n; ++j) {
-        data[i][j] = 2.0 * ((double)rand() / RAND_MAX) - 1.0;
-        printf("%f ", data[i][j]);
-        b[i * n + j] = data[i][j];
-        d[i * n + j] = data[i][j];
-      }
-      printf("\n");
-    }
-    printf("\n\n");
-    dft_2d(d, &act[0], n, dft);
-    fftw_execute(plan);
-
-    int w = n/2 + 1;
-    for (int i = 0; i < n; ++i) {
-      for (int j = 0; j <= n/2; ++j) {
-        printf("r[%d,%d] %f %f %s\n", i, j,
-               act[n * i + j].real(),
-               fft[w * i + j][0],
-               std::abs(act[n * i + j].real() - fft[w * i + j][0]) < 1e-5 ? "ok" : "bad");
-        printf("i[%d,%d] %f %f %s\n", i, j,
-               act[n * i + j].imag(),
-               fft[w * i + j][1],
-               std::abs(act[n * i + j].imag() - fft[w * i + j][1]) < 1e-5 ? "ok" : "bad");
-      }
-      printf("\n");
-    }
-    printf("\n\n");
-    //return 0;
-
-    const int num_trials = 1000000;
-    fprintf(stderr, "running dft_2d\n");
-    Timer timer;
-    timer.start();
-    for (int i = 0; i < num_trials; ++i) {
-      d[i % n2] += 1.0 / (i + 1);
-      dft_2d(d, &act[0], n, dft);
-      //dft_8(&d[0], &act[0]);
-    }
-    double dft_time = timer.stop();
-
-    fprintf(stderr, "running fftw\n");
-    timer.start();
-    for (int i = 0; i < num_trials; ++i) {
-      b[i % n2] += 1.0 / (i + 1);
-      fftw_execute(plan);
-    }
-    double fftw_time = timer.stop();
-    fprintf(stderr, "Speedup: %f\n", dft_time / fftw_time);
   }
   return 0;
 }

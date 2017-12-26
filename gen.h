@@ -296,3 +296,5 @@ void dft_32(float* input, std::complex<float>* output) {
   output[14] = std::conj(w41)  +  std::complex<float>(-kWeight3, -kWeight4) * std::conj(w88);
   output[15] = std::conj(w40)  +  std::complex<float>(-kWeight5, -kWeight6) * std::conj(w87);
 }
+
+#include "new.h"
