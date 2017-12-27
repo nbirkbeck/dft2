@@ -253,16 +253,16 @@ void run_dft_builder(int n) {
     }
   }
 
-  fprintf(stderr, "template <typename T>\n");
-  fprintf(stderr, "void dft_%d_compact(const float* input, float* output, int stride=1) {\n", n);
+  fprintf(stderr, "template <typename T, typename I=float>\n");
+  fprintf(stderr, "void dft_%d_compact(const I* input, I* output, int stride=1) {\n", n);
   for (int k = 2; k < weights.size(); ++k) {
-    fprintf(stderr, "  const T kWeight%d = SimdHelper<T>::constant(%g);\n",
+    fprintf(stderr, "  const T kWeight%d = SimdHelper<T, I>::constant(%g);\n",
             k, weights[k]);
   }
   for (int h = 0; h < n; ++h) {
     const Expression& expr = *exprs[h];
     if (expr.num == 1 && expr.out_var < n) {
-      fprintf(stderr, "  const T i%d = SimdHelper<T>::load(input + %d * stride);\n",
+      fprintf(stderr, "  const T i%d = SimdHelper<T, I>::load(input + %d * stride);\n",
               expr.out_var, expr.out_var);
     }
   }
@@ -295,7 +295,7 @@ void run_dft_builder(int n) {
     }
   }
   for (const auto& assignment : assignments) {
-    fprintf(stderr, "  SimdHelper<T>::store(output + %d * stride, %s);\n",
+    fprintf(stderr, "  SimdHelper<T, I>::store(output + %d * stride, %s);\n",
             assignment.first,
             assignment.second.c_str());
   }
@@ -303,7 +303,7 @@ void run_dft_builder(int n) {
 }
 
 int main(int ac, char* av[]) {
-  for (int x = 2; x <= 32; x *= 2) {
+  for (int x = 2; x <= 64; x *= 2) {
     run_dft_builder(x);
   }
   return 0;
