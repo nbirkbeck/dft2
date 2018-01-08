@@ -121,6 +121,8 @@ __m256 load(float f) {
 }
 
 #include "gen.h"
+#include "inv.h"
+
 
 struct Timer {
   void start() {
@@ -197,10 +199,12 @@ std::vector<std::complex<InputType> > dft(std::vector<InputType> &data) {
 
 template <class InputType=float>
 void validate_1d(int n,
-                 void (*func)(const InputType*, InputType*, int)) {
+                 void (*func)(const InputType*, InputType*, int),
+                 void (*inv)(const InputType*, InputType*, int) = 0) {
   std::vector<InputType> d(n);
   std::vector<std::complex<InputType> > act(n);
   std::vector<InputType> compact(n);
+  std::vector<InputType> d2(n);
   int num_different = 0;
   double total_diff;
 
@@ -208,6 +212,16 @@ void validate_1d(int n,
     d[i] = 1;
     std::vector<std::complex<InputType> > exp = dft<InputType>(d);
     func(&d[0], &compact[0], 1);
+    if (inv) {
+      inv(&compact[0], &d2[0], 1);
+      for (int k = 0; k < n; ++k) {
+        if (std::fabs(d2[k] - d[k] * n) > 1e-4) {
+          printf("1d eye diff: %f %f %d (testing %d)\n", d[k] * n, d2[k], k, i);
+          num_different++;
+        }
+        total_diff += std::abs(d[k] * n - d2[k]);
+      }
+    }
     for (int k = 0; k <= n / 2; k++) {
       act[k] = std::complex<InputType>(
           compact[k],
@@ -561,6 +575,74 @@ void dft_2d(const InputType* input, std::complex<InputType>* output, int n,
   unpack_2d_output(col_fft, output, n);
 }
 
+template <int vec_size=4, typename InputType=float>
+void idft_2d_simd2(const std::complex<InputType>* input,
+                   InputType* output, int n,
+                   typename dft_funs<InputType>::dft_1d_t forward,
+                   typename dft_funs<InputType>::dft_1d_t inv) {
+  static InputType* row_fft = aligned_floats<InputType>(64 * 64);
+  static InputType* col_fft = aligned_floats<InputType>(64 * 64);
+  memset(row_fft, 0, sizeof(InputType) * n * n);
+  memset(col_fft, 0, sizeof(InputType) * n * n);
+
+  // Column 0 and n/2 have conjugate symmetry, so we can directly do the ifft
+  // and get real outputs.
+  for (int y = 0; y <= n / 2; ++y) {
+    row_fft[y] = input[y * n].real();
+    row_fft[y + n] = input[y * n + n / 2].real();
+  }
+  for (int y = n / 2 + 1; y < n; ++y) {
+    row_fft[y] = input[(y - n / 2) * n].imag();
+    row_fft[y + n] = input[(y - n / 2) * n + n / 2].imag();
+  }
+  inv(row_fft, col_fft, 1);
+  inv(row_fft + n, col_fft + n, 1);
+
+  // For the other columns, since we don't have a full ifft for complex inputs
+  // we have to split them into the real and complex counterparts.
+  // Pack the real component then the imaginary components.
+  for (int y = 0; y < n; ++y) {
+    for (int x = 1; x < n / 2; ++x) {
+      row_fft[y + (x + 1) * n] = input[y * n + x].real();
+    }
+    for (int x = 1; x < n / 2; ++x) {
+      row_fft[y + (x + n / 2) * n] = input[y * n + x].imag();
+    }
+  }
+  for (int y = 2; y < n; y++) {
+    forward(row_fft + y * n, col_fft + y * n, 1);
+  }
+
+  // Put the 0 and n/2 th results in the correct place.
+  for (int x = 0; x < n; ++x) {
+    row_fft[x * n] = col_fft[x];
+    row_fft[x * n + n / 2] = col_fft[x + n];
+  }
+  for (int y = 1; y < n / 2; ++y) {
+    // Fill in the real columns (why is this not a - ?)
+    for (int x = 0; x <= n / 2; ++x) {
+      row_fft[x * n + y] = col_fft[(y + 1) * n + x] +
+          ((x > 0 && x < n / 2) ? col_fft[(y + n / 2) * n + x + n /2] : 0);
+    }
+    for (int x = n / 2 + 1; x < n; ++x) {
+      row_fft[x * n + y] = col_fft[(y + 1) * n + (n - x)] -
+          col_fft[(y + n / 2) * n + (n - x) + n / 2];
+    }
+    // Fill in the imag columns
+    for (int x = 0; x <= n / 2; ++x) {
+      row_fft[x * n + y + n / 2] = col_fft[(y + n / 2) * n + x] -
+          ((x > 0 && x < n / 2) ? col_fft[(y + 1) * n + x + n / 2] : 0);
+    }
+    for (int x = n / 2 + 1; x < n; ++x) {
+      row_fft[x * n + y + n / 2] = col_fft[(y + 1) * n + (n - x) + n / 2] +
+          col_fft[(y + n / 2) * n + (n - x)];
+    }
+  }
+  for (int y = 0; y < n; y++) {
+    inv(row_fft + y * n, output + y * n, 1);
+  }
+}
+
 void benchmark() {
   const int n = 8;
   //std::vector<float> d(n*2);
@@ -642,7 +724,8 @@ void validate_2d(int n,
 template <typename InputType=float>
 void benchmark_2d(const int n,
                   typename dft_funs<InputType>::dft_2d_t fun2d,
-                  typename dft_funs<InputType>::dft_1d_t func) {
+                  typename dft_funs<InputType>::dft_1d_t func,
+                  typename dft_funs<InputType>::dft_1d_t inv = nullptr) {
   const int n2 = n * n;
   //std::vector<float> d(n * n);
   std::vector<std::complex<InputType> > act(n * n);
@@ -653,38 +736,63 @@ void benchmark_2d(const int n,
 
   std::vector<InputType> r(n * n);
   InputType* d = aligned_floats<InputType>((n * n + 16));
-  /*
-  for (int i = 0; i < n; ++i) {
-    for (int j = 0; j < n; ++j) {
-      double v = 2.0 * ((double)rand() / RAND_MAX) - 1.0;
-      printf("%f ", v);
-      b[i * n + j] = v;
-      d[i * n + j] = v;
+
+  if (inv) {
+    bool show_data = false;
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j < n; ++j) {
+        double v = 2.0 * ((double)rand() / RAND_MAX) - 1.0;
+        if (show_data) printf("%f ", v);
+        b[i * n + j] = v;
+        d[i * n + j] = v;
+      }
+      if (show_data) printf("\n");
     }
-    printf("\n");
-  }
-  printf("\n\n");
+    if (show_data) printf("\n\n");
+    fftw_execute(plan);
 
-  fftw_execute(plan);
+    fun2d(d, &act[0], n, func);
 
-  fun2d(d, &act[0], n, func);
+    if (show_data) {
+      for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+          printf("%f+%fi ",
+                 fft[n * i + j][0], fft[n * i + j][1]);
+        }
+        printf("\n");
+      }
 
-  int w = n/2 + 1;
-  for (int i = 0; i < n; ++i) {
-    for (int j = 0; j <= n/2; ++j) {
-      printf("r[%d,%d] %f %f %s\n", i, j,
-             act[n * i + j].real(),
-             fft[w * i + j][0],
-             std::abs(act[n * i + j].real() - fft[w * i + j][0]) < 1e-4 ? "ok" : "bad");
-      printf("i[%d,%d] %f %f %s\n", i, j,
-             act[n * i + j].imag(),
-             fft[w * i + j][1],
-             std::abs(act[n * i + j].imag() - fft[w * i + j][1]) < 1e-4 ? "ok" : "bad");
+      int w = n/2 + 1;
+      for (int i = 0; i < n; ++i) {
+        for (int j = 0; j <= n/2; ++j) {
+          printf("r[%d,%d] %f %f %s\n", i, j,
+                 act[n * i + j].real(),
+                 fft[w * i + j][0],
+                 std::abs(act[n * i + j].real() - fft[w * i + j][0]) < 1e-4 ? "ok" : "bad");
+          printf("i[%d,%d] %f %f %s\n", i, j,
+                 act[n * i + j].imag(),
+                 fft[w * i + j][1],
+                 std::abs(act[n * i + j].imag() - fft[w * i + j][1]) < 1e-4 ? "ok" : "bad");
+        }
+        printf("\n");
+      }
+      printf("\n\n");
     }
-    printf("\n");
+    int num_different = 0;
+    idft_2d_simd2<1, InputType>(&act[0], &d[0], n, func, inv);
+
+    for (int y = 0; y < n; ++y) {
+      for (int x = 0; x < n; ++x) {
+        const double diff = std::abs(d[y * n + x] / n / n - b[y * n + x]);
+        if (diff > 1e-4) {
+          fprintf(stderr, "%f %f\n", d[y * n + x] / n / n, b[y * n + x]);
+        }
+        num_different += (diff > 1e-4);
+      }
+    }
+    printf("inv %d num different: %d\n", n, num_different);
+    return;
   }
-  printf("\n\n");
-  */
 
   const int num_trials = 10000000 / n;
   //fprintf(stderr, "\nBenchmarking %d\n", n);
@@ -721,12 +829,12 @@ int main(int ac, char* av[]) {
   }
   if (av[1][0] == 'v') {
     fprintf(stderr, "Testing 1d:\n");
-    validate_1d(2, dft_2_compact<float>);
-    validate_1d(4, dft_4_compact<float>);
-    validate_1d(8, dft_8_compact<float>);
-    validate_1d(16, dft_16_compact<float>);
-    validate_1d(32, dft_32_compact<float>);
-    validate_1d(64, dft_64_compact<float>);
+    validate_1d(2, dft_2_compact<float>, idft_2_compact<float>);
+    validate_1d(4, dft_4_compact<float>, idft_4_compact<float>);
+    validate_1d(8, dft_8_compact<float>, idft_8_compact<float>);
+    validate_1d(16, dft_16_compact<float>, idft_16_compact<float>);
+    validate_1d(32, dft_32_compact<float>, idft_32_compact<float>);
+    validate_1d(64, dft_64_compact<float>, idft_64_compact<float>);
 
     fprintf(stderr, "\nValidating 2d:\n");
     validate_2d(2, dft_2d<float>, dft_2_compact<float, float>);
@@ -785,6 +893,20 @@ int main(int ac, char* av[]) {
     validate_2d<double>(64, dft_2d_simd2<4, double>, dft_64_compact<__m256d, double>);
   }
   if (av[1][0] == '2') {
+    fprintf(stderr, "\nTesting dft\n");
+    benchmark_2d<float>(4, dft_2d<float>, dft_4_compact<float,float>, idft_4_compact<float,float>);
+    benchmark_2d<float>(8, dft_2d<float>, dft_8_compact<float,float>, idft_8_compact<float,float>);
+    benchmark_2d(16, dft_2d<float>, dft_16_compact<float,float>, idft_16_compact<float,float>);
+    benchmark_2d(32, dft_2d<float>, dft_32_compact<float,float>, idft_32_compact<float,float>);
+    benchmark_2d(64, dft_2d<float>, dft_64_compact<float,float>, idft_64_compact<float,float>);
+
+    fprintf(stderr, "\nTesting dft(double)\n");
+    benchmark_2d<double>(4, dft_2d<double>, dft_4_compact<double,double>, idft_4_compact<double, double>);
+    benchmark_2d<double>(8, dft_2d<double>, dft_8_compact<double,double>, idft_8_compact<double, double>);
+    benchmark_2d<double>(16, dft_2d<double>, dft_16_compact<double,double>, idft_16_compact<double, double>);
+    benchmark_2d<double>(32, dft_2d<double>, dft_32_compact<double,double>, idft_32_compact<double, double>);
+    benchmark_2d<double>(64, dft_2d<double>, dft_64_compact<double,double>, idft_64_compact<double, double>);
+
     fprintf(stderr, "\nTesting simd(256)\n");
     benchmark_2d(8, dft_2d_simd, dft_8_compact<__m256>);
 
@@ -812,21 +934,6 @@ int main(int ac, char* av[]) {
     benchmark_2d<double>(16, dft_2d_simd2<2, double>, dft_16_compact<__m128d, double>);
     benchmark_2d<double>(32, dft_2d_simd2<2, double>, dft_32_compact<__m128d, double>);
     benchmark_2d<double>(64, dft_2d_simd2<2, double>, dft_64_compact<__m128d, double>);
-
-
-    fprintf(stderr, "\nTesting dft\n");
-    benchmark_2d(4, dft_2d<float>, dft_4_compact<float,float>);
-    benchmark_2d(8, dft_2d<float>, dft_8_compact<float,float>);
-    benchmark_2d(16, dft_2d<float>, dft_16_compact<float,float>);
-    benchmark_2d(32, dft_2d<float>, dft_32_compact<float,float>);
-    benchmark_2d(64, dft_2d<float>, dft_64_compact<float,float>);
-
-    fprintf(stderr, "\nTesting dft(double)\n");
-    benchmark_2d<double>(4, dft_2d<double>, dft_4_compact<double,double>);
-    benchmark_2d<double>(8, dft_2d<double>, dft_8_compact<double,double>);
-    benchmark_2d<double>(16, dft_2d<double>, dft_16_compact<double,double>);
-    benchmark_2d<double>(32, dft_2d<double>, dft_32_compact<double,double>);
-    benchmark_2d<double>(64, dft_2d<double>, dft_64_compact<double,double>);
   }
   return 0;
 }
