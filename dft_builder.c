@@ -17,6 +17,7 @@ struct Expression {
   std::complex<float> weights[2];
   bool conj[2];
   int weight_ind[2][2];
+  int num_refs = 0;
 };
 
 std::vector<std::unique_ptr<Expression> > expressions;
@@ -317,7 +318,8 @@ void run_dft_builder(int n, bool inverse) {
   }
 
   fprintf(stderr, "template <typename T, typename I=float>\n");
-  fprintf(stderr, "void %sdft_%d_compact(const I* input, I* output, int stride=1) {\n", inverse ? "i" : "", n);
+  fprintf(stderr, "void %sdft_%d_compact(const I* input, I* output, int stride=1) {\n",
+          inverse ? "i" : "", n);
   for (int k = 2; k < weights.size(); ++k) {
     fprintf(stderr, "  const T kWeight%d = SimdHelper<T, I>::constant(%g);\n",
             k, weights[k]);
