@@ -191,7 +191,7 @@ void run_dft_builder(int n, bool inverse) {
   std::vector<OutputVar> declarations;
 
   for (int h = 0; h < exprs.size(); ++h) {
-    const Expression& expr = *exprs[h];
+    Expression& expr = *exprs[h];
     if (expr.num == 1 && expr.out_var < n) {
     } else {
       char output_var_name[64];
@@ -206,56 +206,111 @@ void run_dft_builder(int n, bool inverse) {
       }
       std::vector<std::pair<std::string, std::string> > parts(2);
       std::vector<bool> is_real(2);
+      if (!expr.is_real && h < output[0]->out_var &&
+          expr.num == 2 &&
+          exprs[expr.vars[0]]->is_real &&
+          exprs[expr.vars[1]]->is_real &&
+              //expr.vars[0] < n && (expr.num == 1 || expr.vars[1] < n) &&
+              //!expr.is_real && exprs[expr.vars[0]]->is_real && exprs[expr.vars[1]]->is_real &&
+          ((fabs(expr.weights[0].real()) - fabs(expr.weights[1].imag())) < 1e-4 &&
+           (fabs(expr.weights[0].imag()) - fabs(expr.weights[1].real())) < 1e-4 &&
+           (fabs(expr.weights[0].real()) - fabs(expr.weights[0].imag())) > 1e-4)) {
+        /*
+        fprintf(stderr, "expr h = %d/%d %d is a ref %d(%d) %d(%d) num = %d (%f,%f)  (%f,%f)\n",
+                h, n, expr.out_var,expr.vars[0], expr.conj[0],
+                expr.num == 1 ? 0 : expr.vars[1],
+                expr.conj[1], expr.num,
+                expr.weights[0].real(), expr.weights[0].imag(),
+                expr.weights[1].real(), expr.weights[1].imag());
+        */
+        /*
+        for (int h2 = 0; h2 < exprs.size(); ++h2) {
+          if (exprs[h2]->vars[0] == h) {
+            fprintf(stderr, "  replacing %d\n", h2);
+            exprs[h2]->vars[0] = expr.vars[0];
+          } else if (exprs[h2]->vars[1] == h) {
+            fprintf(stderr, "  replacing %d\n", h2);
+            exprs[h2]->vars[1] = expr.vars[0];
+          }
+        }
+        */
+        expr.num = 0; //
+        continue;
+      }
       for (int k = 0; k < expr.num; ++k) {
         int v = expr.vars[k];
-        char var_name[64];
+        char var_name[2][64];
         is_real[k] = exprs[v]->is_real;
 
         double imag_sign = 1;
-        if (exprs[v]->num == 1) {
-          snprintf(var_name, sizeof(var_name), "i%d", exprs[v]->out_var);
+        if (exprs[v]->num == 0) {
+          if (exprs[exprs[v]->vars[0]]->num == 1) {
+            snprintf(var_name[0], sizeof(var_name[0]), "i%d", exprs[v]->vars[0]);
+          } else {
+            snprintf(var_name[0], sizeof(var_name[0]), "w%d", exprs[v]->vars[0] - n);
+          }
+          if (exprs[exprs[v]->vars[1]]->num == 1) {
+            snprintf(var_name[1], sizeof(var_name[1]), "i%d", exprs[v]->vars[1]);
+          } else {
+            snprintf(var_name[1], sizeof(var_name[1]), "w%d", exprs[v]->vars[1] - n);
+          }
+          if (exprs[v]->weight_ind[1][0] == 0 &&
+              exprs[v]->weight_ind[1][1] == -1) {
+            imag_sign *= -1;
+          }
+          //          fprintf(stderr, "vars: %s %s %f\n", var_name[0], var_name[1], imag_sign);
+        } else if (exprs[v]->num == 1) {
+          snprintf(var_name[0], sizeof(var_name[0]), "i%d", exprs[v]->out_var);
+          strcpy(var_name[1], var_name[0]);
         } else if (output_vars.find(exprs[v]->out_var) != output_vars.end()) {
-          snprintf(var_name, sizeof(var_name), "output[%d]",
+          snprintf(var_name[0], sizeof(var_name[0]), "output[%d]",
                    output_vars[exprs[v]->out_var]);
+          strcpy(var_name[1], var_name[0]);
         } else {
-          snprintf(var_name, sizeof(var_name), "w%d", exprs[v]->out_var - n);
+          if (is_real[k]) {
+            snprintf(var_name[0], sizeof(var_name[0]), "w%d", exprs[v]->out_var - n);
+            strcpy(var_name[1], var_name[0]);
+          } else {
+            snprintf(var_name[0], sizeof(var_name[0]), "w%d[0]", exprs[v]->out_var - n);
+            snprintf(var_name[1], sizeof(var_name[1]), "w%d[1]", exprs[v]->out_var - n);
+          }
         }
         if (expr.conj[k] && !is_real[k]) {
-          imag_sign = -1;
+          imag_sign *= -1;
         }
         if (expr.weight_ind[k][0] == 0 &&
             expr.weight_ind[k][1] == 1) {
           if (is_real[k]) {
-            parts[k] = std::make_pair("", sign_string(imag_sign) + var_name);
+            parts[k] = std::make_pair("", sign_string(imag_sign) + var_name[0]);
           } else {
-            parts[k] = std::make_pair(std::string("-") + std::string(var_name) + "[1]",
-                                      sign_string(imag_sign) + var_name + "[0]");
+            parts[k] = std::make_pair(std::string("-") + std::string(var_name[1]),
+                                      sign_string(imag_sign) + var_name[0]);
           }
         } else if (expr.weight_ind[k][0] == 0 &&
                    expr.weight_ind[k][1] == -1) {
           imag_sign *= -1;
           if (is_real[k]) {
-            parts[k] = std::make_pair("", sign_string(imag_sign) + var_name);
+            parts[k] = std::make_pair("", sign_string(imag_sign) + var_name[0]);
           } else {
-            parts[k] = std::make_pair(std::string(var_name) + "[1]",
-                                      sign_string(imag_sign) + var_name + "[0]");
+            parts[k] = std::make_pair(std::string(var_name[1]),
+                                      sign_string(imag_sign) + var_name[0]);
           }
         } else if (expr.weight_ind[k][0] == 1 &&
             expr.weight_ind[k][1] == 0) {
           if (is_real[k]) {
-            parts[k] = std::make_pair(var_name, "");
+            parts[k] = std::make_pair(var_name[0], "");
           } else {
-            parts[k] = std::make_pair(std::string(var_name) + "[0]",
-                                      sign_string(imag_sign) + var_name + "[1]");
+            parts[k] = std::make_pair(std::string(var_name[0]),
+                                      sign_string(imag_sign) + var_name[1]);
           }
         } else if (expr.weight_ind[k][0] == -1 &&
                    expr.weight_ind[k][1] == 0) {
           if (is_real[k]) {
-            parts[k] = std::make_pair(sign_string(-1) + var_name, "");
+            parts[k] = std::make_pair(sign_string(-1) + var_name[0], "");
           } else {
             imag_sign *= -1;
-            parts[k] = std::make_pair(sign_string(-1) + var_name + "[0]",
-                                      sign_string(imag_sign) + var_name + "[1]");
+            parts[k] = std::make_pair(sign_string(-1) + var_name[0],
+                                      sign_string(imag_sign) + var_name[1]);
           }
         } else {
           char real_weight[64] = {0};
@@ -277,21 +332,21 @@ void run_dft_builder(int n, bool inverse) {
           if (is_real[k]) {
             // This only makes sense for the case when variable is real
             parts[k] = std::make_pair(
-                expr.weight_ind[k][0] == 0 ? "" : std::string(real_weight) + " * " + var_name,
+                expr.weight_ind[k][0] == 0 ? "" : std::string(real_weight) + " * " + var_name[0],
                 sign_string(imag_sign) +
-                (strlen(imag_weight) <= 2 ? std::string(imag_weight) + var_name :
-                 std::string(imag_weight) + " * " + var_name));
+                (strlen(imag_weight) <= 2 ? std::string(imag_weight) + var_name[0] :
+                 std::string(imag_weight) + " * " + var_name[0]));
           } else {
             // This only makes sense for the case when variable is real
             std::string imag_weight_times =
                 strlen(imag_weight) < 2 ? std::string(imag_weight) :
                 std::string(imag_weight) + "*";
             parts[k] = std::make_pair(
-                std::string("(") + std::string(real_weight) + "*" + var_name + "[0] - " +
-                imag_weight_times + var_name + "[1])",
+                std::string("(") + std::string(real_weight) + "*" + var_name[0] + " - " +
+                imag_weight_times + var_name[1] + ")",
                 sign_string(imag_sign) +
-                std::string("(") + std::string(real_weight) + "*" + var_name + "[1] + " +
-                imag_weight_times + var_name + "[0])");
+                std::string("(") + std::string(real_weight) + "*" + var_name[1] + " + " +
+                imag_weight_times + var_name[0] + ")");
           }
         }
       }
@@ -344,12 +399,11 @@ void run_dft_builder(int n, bool inverse) {
           assignments[output_index] = v.imag_part;
         }
       }
-
     } else {
       fprintf(stderr, "%s = ", v.output_var_name.c_str());
       if (v.real_part.size() &&
           v.imag_part.size()) {
-        fprintf(stderr, " {%s, %s};\n",
+        fprintf(stderr, " {(T)(%s), (T)(%s)};\n",
                 v.real_part.c_str(),
                 v.imag_part.c_str());
       } else if (v.real_part.size()) {
@@ -361,8 +415,10 @@ void run_dft_builder(int n, bool inverse) {
       }
     }
   }
+  const char* store = 1 ? "store" : "SimdHelper<T, I>::store";
   for (const auto& assignment : assignments) {
-    fprintf(stderr, "  SimdHelper<T, I>::store(output + %d * stride, %s);\n",
+    fprintf(stderr, "  %s(output + %d * stride, %s);\n",
+            store,
             assignment.first,
             assignment.second.c_str());
   }
@@ -370,7 +426,10 @@ void run_dft_builder(int n, bool inverse) {
 }
 
 int main(int ac, char* av[]) {
-  for (int x = 2; x <= 64; x *= 2) {
+  for (int x = 2; x <= 32; x *= 2) {
+    run_dft_builder(x, false);
+  }
+  for (int x = 2; x <= 32; x *= 2) {
     run_dft_builder(x, true);
   }
   return 0;
