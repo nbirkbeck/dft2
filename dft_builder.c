@@ -1,13 +1,17 @@
 #include <math.h>
 #include <stdlib.h>
 #include <complex.h>
+#include <assert.h>
 #include <vector>
 #include <string>
 #include <unordered_map>
 #include <map>
 #include <memory>
 #include <string.h>
+#include <typeinfo>
 
+#define PRINT_CONCISE 0
+#define SIMPLIFY_DEBUG 0
 
 struct Expression {
   int num = 0;
@@ -96,6 +100,283 @@ void dft_builder(Expression** input,
 
 std::string sign_string(double w) {
   return w < 0 ? "-" : "";
+}
+
+class SimpleExpr {
+ public:
+  SimpleExpr() {}
+  virtual ~SimpleExpr() {}
+  virtual bool is_null() {return false; }
+  virtual std::string to_string() = 0;
+  virtual SimpleExpr* copy() const = 0;
+
+};
+
+class NullExpr: public SimpleExpr {
+ public:
+  virtual bool is_null() {return true; }
+  virtual std::string to_string() { return ""; }
+  virtual SimpleExpr* copy() const { return new NullExpr(); }
+};
+
+class VarExpr: public SimpleExpr {
+ public:
+  VarExpr(std::string var_name) : var_name_(var_name) {}
+  std::string to_string() {
+    return var_name_;
+  }
+  virtual SimpleExpr* copy() const {
+    return new VarExpr(var_name_);
+  }
+  std::string var_name_;
+};
+
+class NegateExpr: public SimpleExpr {
+ public:
+  NegateExpr(std::unique_ptr<SimpleExpr> a): op_(std::move(a)) {}
+  std::string to_string() {
+#if PRINT_CONCISE
+    return std::string("-" + op_->to_string());
+#else
+    return std::string("sub(kWeight0, ") + op_->to_string() + ")";
+#endif
+  }
+  SimpleExpr* copy() const {
+    return new NegateExpr(std::unique_ptr<SimpleExpr>(op_->copy()));
+  }
+  std::unique_ptr<SimpleExpr> op_;
+};
+
+class AddExpr: public SimpleExpr {
+ public:
+  AddExpr(std::unique_ptr<SimpleExpr> a,
+          std::unique_ptr<SimpleExpr> b) :
+      op1_(std::move(a)), op2_(std::move(b)) {}
+  std::string to_string() {
+#if PRINT_CONCISE
+    return "(" + op1_->to_string() + " + " + op2_->to_string() + ")";
+#else
+    return std::string("add( " + op1_->to_string()
+                     + "," + op2_->to_string() + ")");
+#endif
+
+  }
+  SimpleExpr* copy() const {
+    return new AddExpr(std::unique_ptr<SimpleExpr>(op1_->copy()),
+                       std::unique_ptr<SimpleExpr>(op2_->copy()));
+  }
+  std::unique_ptr<SimpleExpr> op1_;
+  std::unique_ptr<SimpleExpr> op2_;
+};
+
+class SubExpr: public SimpleExpr {
+ public:
+  SubExpr(std::unique_ptr<SimpleExpr> a,
+          std::unique_ptr<SimpleExpr> b) :
+      op1_(std::move(a)), op2_(std::move(b)) {}
+  std::string to_string() {
+#if PRINT_CONCISE
+      return std::string("( " + op1_->to_string()
+                         + "-" + op2_->to_string() + ")");
+#else
+      return std::string("sub( " + op1_->to_string()
+                         + "," + op2_->to_string() + ")");
+#endif
+  }
+  SimpleExpr* copy() const {
+    return new SubExpr(std::unique_ptr<SimpleExpr>(op1_->copy()),
+                       std::unique_ptr<SimpleExpr>(op2_->copy()));
+  }
+  std::unique_ptr<SimpleExpr> op1_;
+  std::unique_ptr<SimpleExpr> op2_;
+};
+
+class MulExpr: public SimpleExpr {
+ public:
+  MulExpr(std::unique_ptr<SimpleExpr> a,
+          std::unique_ptr<SimpleExpr> b) :
+      op1_(std::move(a)), op2_(std::move(b)) { }
+  std::string to_string() {
+#if PRINT_CONCISE
+    return std::string(op1_->to_string() + "*" + op2_->to_string());
+#else
+    return std::string("mul( " + op1_->to_string()
+                     + "," + op2_->to_string() + ")");
+#endif
+  }
+  SimpleExpr* copy() const {
+    return new MulExpr(std::unique_ptr<SimpleExpr>(op1_->copy()),
+                       std::unique_ptr<SimpleExpr>(op2_->copy()));
+  }
+  std::unique_ptr<SimpleExpr> op1_;
+  std::unique_ptr<SimpleExpr> op2_;
+};
+
+
+std::unique_ptr<SimpleExpr> null() {
+  return std::unique_ptr<SimpleExpr>(new NullExpr);
+}
+
+
+std::unique_ptr<SimpleExpr>
+add(std::unique_ptr<SimpleExpr> a,
+    std::unique_ptr<SimpleExpr> b) {
+  if (!a->is_null() && !b->is_null())
+    return std::unique_ptr<SimpleExpr>(new AddExpr(std::move(a),
+                                                 std::move(b)));
+
+  if (a->is_null() && b->is_null()) return null();
+  if (!a->is_null()) return std::move(a);
+  if (!b->is_null()) return std::move(b);
+}
+
+std::unique_ptr<SimpleExpr> sign(float exp_sign, std::unique_ptr<SimpleExpr> e) {
+  if (exp_sign < 0) {
+    return std::unique_ptr<SimpleExpr>(new NegateExpr(std::move(e)));
+  } else return e;
+}
+
+std::unique_ptr<SimpleExpr>
+sub(std::unique_ptr<SimpleExpr> a,
+    std::unique_ptr<SimpleExpr> b) {
+  if (!a->is_null() && !b->is_null())
+    return std::unique_ptr<SimpleExpr>(new SubExpr(std::move(a),                                                 std::move(b)));
+  if (!a->is_null()) return std::move(a);
+  if (!b->is_null()) return sign(-1, std::move(b));
+  return null();
+
+  /*
+std::string sub(std::string a, std::string b, bool paren) {
+  if (paren) {
+    //return "( " + a + " - " + b + ")";
+    return "sub(" + a + "," + b + ")";
+  } else {
+    return "sub(" + a + "," + b + ")";
+    }*/
+}
+
+std::unique_ptr<SimpleExpr> var(std::string e) {
+  return std::unique_ptr<SimpleExpr>(new VarExpr(e));
+}
+
+std::unique_ptr<SimpleExpr>
+mul(std::unique_ptr<SimpleExpr> a,
+    std::unique_ptr<SimpleExpr> b) {
+  if (!a->is_null() && !b->is_null())
+    return std::unique_ptr<SimpleExpr>(new MulExpr(std::move(a),
+                                                   std::move(b)));
+  if (!a->is_null()) return std::move(a);
+  if (!b->is_null()) return std::move(b);
+  return null();
+}
+
+std::unique_ptr<SimpleExpr> simplify(std::unique_ptr<SimpleExpr> expr,
+                                     bool move_neg_up = false) {
+  AddExpr* add_expr = dynamic_cast<AddExpr*>(expr.get());
+  SubExpr* sub_expr = dynamic_cast<SubExpr*>(expr.get());
+  std::string input = expr->to_string();
+
+  if (add_expr) {
+    std::unique_ptr<SimpleExpr> a = simplify(std::move(add_expr->op1_), move_neg_up);
+    std::unique_ptr<SimpleExpr> b = simplify(std::move(add_expr->op2_), move_neg_up);
+    NegateExpr* a_neg = dynamic_cast<NegateExpr*>(a.get());
+    NegateExpr* b_neg = dynamic_cast<NegateExpr*>(b.get());
+    if (b_neg) { // && !a_neg) {
+      auto out = sub(std::move(a), std::move(b_neg->op_));
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "changing add to sub: %s  to   %s\n", input.c_str(), out->to_string().c_str());
+#endif
+      return std::move(out);
+    }
+    if (a_neg && !b_neg) {
+      auto out = sub(std::move(b), std::move(a_neg->op_));
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "changing add to sub: %s   to   %s\n", input.c_str(), out->to_string().c_str());
+#endif
+      return std::move(out);
+    }
+    MulExpr* a_mul = dynamic_cast<MulExpr*>(a.get());
+    MulExpr* b_mul = dynamic_cast<MulExpr*>(b.get());
+    if (a_mul && b_mul &&
+        a_mul->op1_->to_string() == b_mul->op1_->to_string()) {
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "distributing k * a + k * b -> k *(a + b) with %s  to   %s\n",
+              a_mul->op1_->to_string().c_str(),
+              input.c_str());
+#endif
+      return mul(std::move(a_mul->op1_),
+                 add(std::move(a_mul->op2_), std::move(b_mul->op2_)));
+    }
+    return add(std::move(a), std::move(b));
+  }
+  if (sub_expr) {
+    std::unique_ptr<SimpleExpr> a = simplify(std::move(sub_expr->op1_), move_neg_up);
+    std::unique_ptr<SimpleExpr> b = simplify(std::move(sub_expr->op2_), move_neg_up);
+    NegateExpr* b_neg = dynamic_cast<NegateExpr*>(b.get());
+    NegateExpr* a_neg = dynamic_cast<NegateExpr*>(a.get());
+    if (a_neg && b_neg) {
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "Double neg\n");
+      // -1 * ((a) - (b))
+#endif
+      return sign(-1, sub(std::move(a_neg->op_), std::move(b_neg->op_)));
+    }
+    if (b_neg) {
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "sub, b neg to add\n");
+#endif
+      return add(std::move(a), std::move(b_neg->op_));
+    }
+    MulExpr* a_mul = dynamic_cast<MulExpr*>(a.get());
+    MulExpr* b_mul = dynamic_cast<MulExpr*>(b.get());
+    if (a_mul && b_mul &&
+        a_mul->op1_->to_string() == b_mul->op1_->to_string()) {
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "distributing k * a - k * b -> k *(a - b) with k = %s, a = %s, b = %s to   %s\n",
+              a_mul->op1_->to_string().c_str(),
+              a_mul->op2_->to_string().c_str(),
+              b_mul->op2_->to_string().c_str(),
+              input.c_str());
+#endif
+      return mul(std::move(a_mul->op1_),
+                 sub(std::move(a_mul->op2_), std::move(b_mul->op2_)));
+    }
+    return sub(std::move(a), std::move(b));
+  }
+  MulExpr* mul_expr = dynamic_cast<MulExpr*>(expr.get());
+  if (mul_expr) {
+    std::unique_ptr<SimpleExpr> a = simplify(std::move(mul_expr->op1_), move_neg_up);
+    std::unique_ptr<SimpleExpr> b = simplify(std::move(mul_expr->op2_), move_neg_up);
+    NegateExpr* a_neg = dynamic_cast<NegateExpr*>(a.get());
+    NegateExpr* b_neg = dynamic_cast<NegateExpr*>(b.get());
+    if (a_neg && b_neg) {
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "Removing neg\n");
+#endif
+      return mul(std::move(a_neg->op_), std::move(b_neg->op_));
+    }
+
+    if (move_neg_up && a_neg) {
+      auto out = sign(-1, mul(std::move(a_neg->op_), std::move(b)));
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "Moving neg up, a: %s    %s\n", input.c_str(), out->to_string().c_str());
+#endif
+      return std::move(out);
+    }
+    if (move_neg_up && b_neg) {
+      auto out = sign(-1, mul(std::move(a), std::move(b_neg->op_)));
+#if SIMPLIFY_DEBUG
+      fprintf(stderr, "Moving neg up, b: %s    %s\n", input.c_str(), out->to_string().c_str());
+#endif
+      return std::move(out);
+    }
+    return mul(std::move(a), std::move(b));
+  }
+  return std::move(expr);
+}
+
+std::unique_ptr<SimpleExpr> copy(const std::unique_ptr<SimpleExpr>& in) {
+  return std::unique_ptr<SimpleExpr>(in->copy());
 }
 
 void run_dft_builder(int n, bool inverse) {
@@ -197,14 +478,15 @@ void run_dft_builder(int n, bool inverse) {
       char output_var_name[64];
       if (output_vars.find(h) == output_vars.end()) {
         if (expr.is_real) {
-          snprintf(output_var_name, 64, "  const T w%d ",
+          snprintf(output_var_name, 64, "  const T_VEC w%d ",
                    expr.out_var - n);
         } else {
-          snprintf(output_var_name, 64, "  const T w%d[2] ",
+          snprintf(output_var_name, 64, "  const T_VEC w%d[2] ",
                    expr.out_var - n);
         }
       }
-      std::vector<std::pair<std::string, std::string> > parts(2);
+      std::vector<std::pair<std::unique_ptr<SimpleExpr>,
+                            std::unique_ptr<SimpleExpr> > > parts(2);
       std::vector<bool> is_real(2);
       if (!expr.is_real && h < output[0]->out_var &&
           expr.num == 2 &&
@@ -281,85 +563,94 @@ void run_dft_builder(int n, bool inverse) {
         if (expr.weight_ind[k][0] == 0 &&
             expr.weight_ind[k][1] == 1) {
           if (is_real[k]) {
-            parts[k] = std::make_pair("", sign_string(imag_sign) + var_name[0]);
+            parts[k] = std::make_pair(null(),
+                                      sign(imag_sign, var(var_name[0])));
           } else {
-            parts[k] = std::make_pair(std::string("-") + std::string(var_name[1]),
-                                      sign_string(imag_sign) + var_name[0]);
+            parts[k] = std::make_pair(sign(-1, var(var_name[1])),
+                                      sign(imag_sign, var(var_name[0])));
           }
         } else if (expr.weight_ind[k][0] == 0 &&
                    expr.weight_ind[k][1] == -1) {
           imag_sign *= -1;
           if (is_real[k]) {
-            parts[k] = std::make_pair("", sign_string(imag_sign) + var_name[0]);
+            parts[k] = std::make_pair(null(),
+                                      sign(imag_sign, var(var_name[0])));
           } else {
-            parts[k] = std::make_pair(std::string(var_name[1]),
-                                      sign_string(imag_sign) + var_name[0]);
+            parts[k] = std::make_pair(var(var_name[1]),
+                                      sign(imag_sign, var(var_name[0])));
           }
         } else if (expr.weight_ind[k][0] == 1 &&
             expr.weight_ind[k][1] == 0) {
           if (is_real[k]) {
-            parts[k] = std::make_pair(var_name[0], "");
+            parts[k] = std::make_pair(var(var_name[0]), null());
           } else {
-            parts[k] = std::make_pair(std::string(var_name[0]),
-                                      sign_string(imag_sign) + var_name[1]);
+            parts[k] = std::make_pair(var(var_name[0]),
+                                      sign(imag_sign, var(var_name[1])));
           }
         } else if (expr.weight_ind[k][0] == -1 &&
                    expr.weight_ind[k][1] == 0) {
           if (is_real[k]) {
-            parts[k] = std::make_pair(sign_string(-1) + var_name[0], "");
+            parts[k] = std::make_pair(sign(-1, var(var_name[0])), null());
           } else {
             imag_sign *= -1;
-            parts[k] = std::make_pair(sign_string(-1) + var_name[0],
-                                      sign_string(imag_sign) + var_name[1]);
+            parts[k] = std::make_pair(sign(-1, var(var_name[0])),
+                                      sign(imag_sign, var(var_name[1])));
           }
         } else {
-          char real_weight[64] = {0};
-          char imag_weight[64] = {0};
+          std::unique_ptr<SimpleExpr> real_weight;
+          std::unique_ptr<SimpleExpr> imag_weight;
+          bool real_neg = false;
+          bool imag_neg = false;
           if (expr.weight_ind[k][0] == -1) {
-            snprintf(real_weight, sizeof(real_weight), "-");
+            //snprintf(real_weight_name, sizeof(real_weight_name), "-");
+            real_neg = true;
           } else if (expr.weight_ind[k][0] != 1) {
-            snprintf(real_weight, sizeof(real_weight), "%ckWeight%d",
-                     expr.weight_ind[k][0] < 0 ? '-' : ' ',
+            char real_weight_name[64] = {0};
+            snprintf(real_weight_name, sizeof(real_weight_name), "kWeight%d",
                      std::abs(expr.weight_ind[k][0]));
+            real_weight = sign(expr.weight_ind[k][0], var(real_weight_name));
           }
           if (expr.weight_ind[k][1] == -1) {
-            snprintf(imag_weight, sizeof(imag_weight), "-");
+            //snprintf(imag_weight_name, sizeof(imag_weight_name), "-");
+            imag_neg = true;
           } else if (expr.weight_ind[k][1] != 1) {
-            snprintf(imag_weight, sizeof(imag_weight), "%ckWeight%d",
-                     (imag_sign * expr.weight_ind[k][1]) < 0 ? '-' : ' ',
+            char imag_weight_name[64] = {0};
+            snprintf(imag_weight_name, sizeof(imag_weight_name), "kWeight%d",
                      std::abs(expr.weight_ind[k][1]));
+            imag_weight = sign(imag_sign * expr.weight_ind[k][1], var(imag_weight_name));
           }
           if (is_real[k]) {
             // This only makes sense for the case when variable is real
             parts[k] = std::make_pair(
-                expr.weight_ind[k][0] == 0 ? "" : std::string(real_weight) + " * " + var_name[0],
-                sign_string(imag_sign) +
-                (strlen(imag_weight) <= 2 ? std::string(imag_weight) + var_name[0] :
-                 std::string(imag_weight) + " * " + var_name[0]));
+                    expr.weight_ind[k][0] == 0 ? std::unique_ptr<SimpleExpr>(new NullExpr) :
+                    !real_weight ? sign(real_neg ? -1 : 1, var(var_name[0])) :
+                    mul(std::move(real_weight), var(var_name[0])),
+                sign(imag_sign,
+                     (!imag_weight ? sign(imag_neg ? -1 : 1,  var(var_name[0])) :
+                      mul(std::move(imag_weight), var(var_name[0])))));
           } else {
+            assert(imag_weight);
+            assert(real_weight);
             // This only makes sense for the case when variable is real
-            std::string imag_weight_times =
-                strlen(imag_weight) < 2 ? std::string(imag_weight) :
-                std::string(imag_weight) + "*";
             parts[k] = std::make_pair(
-                std::string("(") + std::string(real_weight) + "*" + var_name[0] + " - " +
-                imag_weight_times + var_name[1] + ")",
-                sign_string(imag_sign) +
-                std::string("(") + std::string(real_weight) + "*" + var_name[1] + " + " +
-                imag_weight_times + var_name[0] + ")");
+                sub(mul(copy(real_weight), var(var_name[0])),
+                    mul(copy(imag_weight), var(var_name[1]))),
+                sign(imag_sign,
+                     add(mul(copy(real_weight), var(var_name[1])),
+                         mul(copy(imag_weight), var(var_name[0])))));
           }
         }
       }
-      std::string real_part, imag_part;
-        real_part =
-            parts[0].first +
-            (parts[0].first.empty() || parts[1].first.empty() ? "" : " +") +
-            parts[1].first;
-        imag_part =
-            parts[0].second +
-            (parts[0].second.empty() || parts[1].second.empty() ? "" : " +") +
-            parts[1].second;
-
+      auto real = add(std::move(parts[0].first),
+                      std::move(parts[1].first));
+      auto imag = add(std::move(parts[0].second),
+                      std::move(parts[1].second));
+      for (int i = 0; i < 10; ++i) {
+        real = simplify(std::move(real), i && (i % 3 == 0));
+        imag = simplify(std::move(imag), i && (i % 3 == 0));
+      }
+      std::string real_part = real->to_string();
+      std::string imag_part = imag->to_string();
       OutputVar output_var;
       output_var.output_var_name = output_var_name;
       output_var.real_part = real_part;
@@ -373,16 +664,17 @@ void run_dft_builder(int n, bool inverse) {
   }
 
   fprintf(stderr, "template <typename T, typename I=float>\n");
-  fprintf(stderr, "void %sdft_%d_compact(const I* input, I* output, int stride=1) {\n",
+  fprintf(stderr, "void %sdft_%d_compact(const I* input, I* output, int stride=1) { \\ \n",
           inverse ? "i" : "", n);
-  for (int k = 2; k < weights.size(); ++k) {
-    fprintf(stderr, "  const T kWeight%d = SimdHelper<T, I>::constant(%g);\n",
+  for (int k = 0; k < weights.size(); ++k) {
+    if (k == 1) continue;
+    fprintf(stderr, "  const T_VEC kWeight%d = constant(%gf); \\ \n",
             k, weights[k]);
   }
   for (int h = 0; h < n; ++h) {
     const Expression& expr = *exprs[h];
     if (expr.num == 1 && expr.out_var < n) {
-      fprintf(stderr, "  const T i%d = SimdHelper<T, I>::load(input + %d * stride);\n",
+      fprintf(stderr, "  const T_VEC i%d = load(input + %d * stride); \\ \n",
               expr.out_var, expr.out_var);
     }
   }
@@ -403,21 +695,21 @@ void run_dft_builder(int n, bool inverse) {
       fprintf(stderr, "%s = ", v.output_var_name.c_str());
       if (v.real_part.size() &&
           v.imag_part.size()) {
-        fprintf(stderr, " {(T)(%s), (T)(%s)};\n",
+        fprintf(stderr, " {%s, %s}; \\ \n",
                 v.real_part.c_str(),
                 v.imag_part.c_str());
       } else if (v.real_part.size()) {
-        fprintf(stderr, "%s;\n",
+        fprintf(stderr, "%s; \\ \n",
                 v.real_part.c_str());
       } else if (v.imag_part.size()) {
-        fprintf(stderr, "%s;\n",
+        fprintf(stderr, "%s; \\ \n",
                 v.imag_part.c_str());
       }
     }
   }
   const char* store = 1 ? "store" : "SimdHelper<T, I>::store";
   for (const auto& assignment : assignments) {
-    fprintf(stderr, "  %s(output + %d * stride, %s);\n",
+    fprintf(stderr, "  %s(output + %d * stride, %s);  \\\n",
             store,
             assignment.first,
             assignment.second.c_str());
